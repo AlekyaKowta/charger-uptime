@@ -38,9 +38,12 @@ Run test suite:
 
 For each station:
 
-``` station_start = min(start times from all reports for its chargers)
+``` 
+station_start = min(start times from all reports for its chargers)
 station_end   = max(end times from all reports for its chargers)
-total_span    = station_end – station_start ```
+total_span    = station_end – station_start 
+
+```
 
 
 All time outside reported intervals is considered downtime, per the specification.
@@ -91,6 +94,34 @@ Uptime intervals from chargers within a station are merged using standard interv
     - uptime percentage (floor)
 
 6. Print results in ascending station order
+
+
+# Time Complexity
+
+Let:
+
+- R = total number of report lines
+
+- S = number of stations
+
+- Uᵢ = number of up-intervals for station i
+
+``` O(R log R) ```
+
+
+# Space Complexity
+
+```O(R)```
+
+
+Notes
+
+- Python 3.9+ recommended
+
+- No third-party libraries required (except pytest for testing)
+
+- Output formatting exactly matches spec (station ID + uptime)
+
 
 
 
