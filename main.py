@@ -1,33 +1,38 @@
 #!/usr/bin/env python3
 import sys
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple
 
 
 def parse_input_file(path: str):
     """
-    Parse the input file into:
-      - station_chargers: dict[station_id] -> set[charger_id]
-      - charger_reports: dict[charger_id] -> list[(start, end, up_bool)]
+    Parse file into:
+      - station_ids: sorted list of station IDs
+      - charger_to_station: charger_id -> station_id
+      - station_min_max: station_id -> [min_time, max_time]
+      - station_up_intervals: station_id -> list[(start, end)]
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
-            lines = [line.strip() for line in f.readlines()]
+            lines = [line.strip() for line in f]
     except OSError as e:
-        # Couldn’t open file: treat as invalid input.
         print(f"Error: cannot open input file: {e}", file=sys.stderr)
         sys.exit(1)
 
     section = None
-    station_chargers: Dict[int, Set[int]] = {}
-    charger_reports: Dict[int, List[Tuple[int, int, bool]]] = {}
+    charger_to_station: Dict[int, int] = {}
+    station_ids = set()
 
-    for raw_line in lines:
-        line = raw_line.strip()
+    # These are filled while parsing reports
+    station_min_max: Dict[int, List[int]] = {}        # station_id -> [min_time, max_time]
+    station_up_intervals: Dict[int, List[Tuple[int, int]]] = {}  # station_id -> up intervals
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
         if not line:
-            # ignore blank lines
             continue
 
-        # Section headers
         if line.startswith("[") and line.endswith("]"):
             lower = line.lower()
             if lower == "[stations]":
@@ -35,7 +40,6 @@ def parse_input_file(path: str):
             elif lower == "[charger availability reports]":
                 section = "reports"
             else:
-                # Unknown section: treat as invalid input
                 print(f"Error: unknown section header: {line}", file=sys.stderr)
                 sys.exit(1)
             continue
@@ -43,7 +47,6 @@ def parse_input_file(path: str):
         if section == "stations":
             parts = line.split()
             if len(parts) < 2:
-                # Station line must have at least 1 charger
                 print(f"Error: invalid station line: {line}", file=sys.stderr)
                 sys.exit(1)
             try:
@@ -53,15 +56,25 @@ def parse_input_file(path: str):
                 print(f"Error: non-integer in station line: {line}", file=sys.stderr)
                 sys.exit(1)
 
-            if station_id not in station_chargers:
-                station_chargers[station_id] = set()
-            station_chargers[station_id].update(charger_ids)
+            if station_id in station_ids:
+                print(f"Error: duplicate station ID: {station_id}", file=sys.stderr)
+                sys.exit(1)
+
+            station_ids.add(station_id)
+
+            for cid in charger_ids:
+                if cid in charger_to_station:
+                    # per preconditions this shouldn't happen
+                    print(f"Error: charger {cid} assigned to multiple stations", file=sys.stderr)
+                    sys.exit(1)
+                charger_to_station[cid] = station_id
 
         elif section == "reports":
             parts = line.split()
             if len(parts) != 4:
                 print(f"Error: invalid report line: {line}", file=sys.stderr)
                 sys.exit(1)
+
             try:
                 charger_id = int(parts[0])
                 start = int(parts[1])
@@ -80,22 +93,33 @@ def parse_input_file(path: str):
                 sys.exit(1)
             up = (up_str == "true")
 
-            charger_reports.setdefault(charger_id, []).append((start, end, up))
+            # Map charger -> station; ignore reports for chargers not in [Stations]
+            station_id = charger_to_station.get(charger_id)
+            if station_id is None:
+                continue
+
+            # Update station time bounds
+            if station_id not in station_min_max:
+                station_min_max[station_id] = [start, end]
+            else:
+                mm = station_min_max[station_id]
+                if start < mm[0]:
+                    mm[0] = start
+                if end > mm[1]:
+                    mm[1] = end
+
+            # Store only up=true intervals
+            if up:
+                station_up_intervals.setdefault(station_id, []).append((start, end))
 
         else:
-            # Line before any known section – ignore or treat as invalid.
-            # Here we’ll just treat it as invalid to be strict.
             print(f"Error: content outside of a known section: {line}", file=sys.stderr)
             sys.exit(1)
 
-    return station_chargers, charger_reports
+    return sorted(station_ids), station_min_max, station_up_intervals
 
 
 def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    """
-    Given a list of [start, end) intervals (with start <= end),
-    merge overlapping ones and return the merged list.
-    """
     if not intervals:
         return []
 
@@ -105,10 +129,8 @@ def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     for start, end in intervals[1:]:
         last = merged[-1]
         if start > last[1]:
-            # disjoint
             merged.append([start, end])
         else:
-            # overlapping or touching; extend the last interval
             if end > last[1]:
                 last[1] = end
 
@@ -116,70 +138,50 @@ def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
 
 
 def compute_station_uptimes(
-    station_chargers: Dict[int, Set[int]],
-    charger_reports: Dict[int, List[Tuple[int, int, bool]]],
+    station_ids: List[int],
+    station_min_max: Dict[int, List[int]],
+    station_up_intervals: Dict[int, List[Tuple[int, int]]],
 ) -> Dict[int, int]:
-    """
-    For each station, compute the uptime percentage (0-100),
-    rounded down to the nearest integer.
-    """
-    station_uptimes: Dict[int, int] = {}
+    uptimes: Dict[int, int] = {}
 
-    for station_id in sorted(station_chargers.keys()):
-        chargers = station_chargers[station_id]
-
-        # Collect all report entries and "up" intervals for this station’s chargers
-        all_entries: List[Tuple[int, int]] = []
-        up_intervals: List[Tuple[int, int]] = []
-
-        for cid in chargers:
-            for start, end, up in charger_reports.get(cid, []):
-                all_entries.append((start, end))
-                if up:
-                    up_intervals.append((start, end))
-
-        if not all_entries:
-            # No data at all for this station’s chargers.
-            station_uptimes[station_id] = 0
+    for sid in station_ids:
+        mm = station_min_max.get(sid)
+        if not mm:
+            # No reports at all for this station
+            uptimes[sid] = 0
             continue
 
-        # Time window for this station
-        station_start = min(s for s, _ in all_entries)
-        station_end = max(e for _, e in all_entries)
-        total_span = station_end - station_start
-
+        start, end = mm
+        total_span = end - start
         if total_span <= 0:
-            station_uptimes[station_id] = 0
+            uptimes[sid] = 0
             continue
 
-        # Sum union of up intervals
-        merged_up = merge_intervals(up_intervals)
-        up_time = sum(e - s for (s, e) in merged_up)
+        ups = station_up_intervals.get(sid, [])
+        merged = merge_intervals(ups)
+        up_time = sum(e - s for (s, e) in merged)
 
-        # Floor to nearest integer percent
-        uptime_pct = (up_time * 100) // total_span
-        if uptime_pct < 0:
-            uptime_pct = 0
-        elif uptime_pct > 100:
-            uptime_pct = 100
+        pct = (up_time * 100) // total_span
+        if pct < 0:
+            pct = 0
+        elif pct > 100:
+            pct = 100
 
-        station_uptimes[station_id] = uptime_pct
+        uptimes[sid] = pct
 
-    return station_uptimes
+    return uptimes
 
 
-def main(argv: List[str]) -> None:
+def main(argv):
     if len(argv) != 2:
         print(f"Usage: {argv[0]} <input_file>", file=sys.stderr)
         sys.exit(1)
 
-    input_path = argv[1]
-    station_chargers, charger_reports = parse_input_file(input_path)
-    uptimes = compute_station_uptimes(station_chargers, charger_reports)
+    station_ids, station_min_max, station_up_intervals = parse_input_file(argv[1])
+    uptimes = compute_station_uptimes(station_ids, station_min_max, station_up_intervals)
 
-    # Print in ascending Station ID order
-    for station_id in sorted(uptimes.keys()):
-        print(f"{station_id} {uptimes[station_id]}")
+    for sid in station_ids:
+        print(f"{sid} {uptimes.get(sid, 0)}")
 
 
 if __name__ == "__main__":
