@@ -17,9 +17,11 @@ Run the solution from terminal:
 
 This will print:
 
-``` 0 100 ```
-``` 1 0   ```
-``` 2 75  ```
+``` 
+ 0 100 
+ 1 0   
+ 2 75  
+```
 
 # How to Run Tests
 
